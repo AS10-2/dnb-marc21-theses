@@ -12,6 +12,7 @@ dependencies = [
     "seaborn>=0.13.2",
     "duckdb>=1.4.1",
     "scikit-learn>=1.7.2",
+    "lxml >=4.9"
 ]
 
 [build-system]
