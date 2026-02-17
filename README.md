@@ -1,4 +1,4 @@
-# [Datengetriebene Analyse deutschsprachiger Dissertationen] 🚀
+# Datengetriebene Analyse deutschsprachiger Dissertationen 🚀
 
 Analyse von DNB-Hochschulschriften anhand der MARC21-Metadaten, um den Wandel fachlicher Zuordnungen im zeitlichen Verlauf zu erkennen und ältere Arbeiten prototypisch zu klassifizieren.
 
@@ -11,8 +11,6 @@ Die Deutsche Nationalbibliothek (DNB) sammelt seit 1913 alle Hochschulschriften 
 
 **Ziel:** 
 Analyse des Wandels der fachlichen Zuordnungen von Mineralogie-Hochschulschriften, Visualisierung von Trends und prototypische Retroklassifizierung älterer Datensätze auf moderne Fachgruppen.
-
-**Methoden:**  
 
 **Methoden:** 
 - Parsing der MARC21-XML-Daten der DNB  
@@ -64,4 +62,8 @@ Führe die Notebooks in der folgenden Reihenfolge aus:
 
 4. **`notebooks/04_results.ipynb`** *(in progress)*  
    - Platzhalter: Ergebnisse, Visualisierungen, Zusammenfassungen
+
+### Lizenz
+
+### Kontakt
 
