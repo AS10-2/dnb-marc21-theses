@@ -1,24 +1,55 @@
-import matplotlib.pyplot as plt
+"""
+explorer.py
+
+EDA und Visualisierung für DNB-Hochschulschriften.
+
+Funktioniert defensiv auf allen Pipeline-Stufen:
+    df_raw        → overview, missing_report, field_stats
+    df_clean      → zusätzlich value_counts, subfield_counts
+    df_transformed → zusätzlich alle Klassifikations-Analysen
+
+Pipeline:
+    Marc21Parser → Cleaner → ClassificationTransformer → Explorer
+"""
+
+from typing import List
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import seaborn as sns
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# ── DDC-Hauptklassen ──────────────────────────────────────────
+DDC_MAIN = {
+    "0": "Allgemeines",
+    "1": "Philosophie",
+    "2": "Religion",
+    "3": "Sozialwissenschaften",
+    "4": "Sprache",
+    "5": "Naturwissenschaften",
+    "6": "Technik",
+    "7": "Kunst",
+    "8": "Literatur",
+    "9": "Geschichte",
+}
+
+
+# ======================================================
+# Basis-Explorer — funktioniert auf df_raw
+# ======================================================
 
 
 class DataExplorer:
-    """
-    Schlanke Utility-Klasse für strukturierte DataFrame-EDA.
-    Erwartet bereits korrekt typisierte Daten
-    (z.B. MARC-Listen als list[dict], nicht als JSON-Strings).
-    """
+    """Generische EDA-Utilities für beliebige DataFrames."""
 
     def __init__(self, df: pd.DataFrame):
         self.df = df.copy()
 
     # --------------------------------------------------
-    # Übersicht über Spalten
+    # Spaltenübersicht
     # --------------------------------------------------
-    def overview(self, max_elements_preview: int = 5):
+    def overview(self, max_preview: int = 5) -> pd.DataFrame:
         result = pd.DataFrame(
             {
                 "dtype": self.df.dtypes,
@@ -27,106 +58,42 @@ class DataExplorer:
                 "missing_%": (self.df.isna().mean() * 100).round(2),
             }
         )
-
-        # Unique-Werte + Preview
-        uniques_n = []
-        uniques_preview = []
-
+        uniques_n, uniques_preview = [], []
         for col in self.df.columns:
-            series = self.df[col]
-
-            # Listen/Dicts serialisieren für eindeutige Zählung
-            if series.apply(lambda x: isinstance(x, (list, dict))).any():
-                series = series.apply(str)
-
-            uniques_n.append(series.nunique(dropna=True))
-
-            vals = series.dropna().unique()
-            if len(vals) > max_elements_preview:
-                preview = list(vals[:max_elements_preview])
-                preview.append(f"... (+{len(vals) - max_elements_preview})")
-            else:
-                preview = list(vals)
-
+            s = self.df[col]
+            if s.apply(lambda x: isinstance(x, (list, dict))).any():
+                s = s.apply(str)
+            n = s.nunique(dropna=True)
+            uniques_n.append(n)
+            vals = s.dropna().unique()
+            preview = list(vals[:max_preview])
+            if len(vals) > max_preview:
+                preview.append(f"... (+{len(vals) - max_preview})")
             uniques_preview.append(preview)
-
         result["uniques_n"] = uniques_n
         result["uniques_preview"] = uniques_preview
-
         return result
 
     # --------------------------------------------------
-    # Value Counts (funktioniert auch für Listenfelder)
+    # Missing Report
     # --------------------------------------------------
-    def value_counts(self, column):
-        if column not in self.df.columns:
-            raise ValueError(f"Spalte '{column}' existiert nicht")
-
-        series = self.df[column]
-
-        # Listen explodieren
-        if series.apply(lambda x: isinstance(x, list)).any():
-            series = series.explode()
-
-        return series.value_counts(dropna=False)
-
-    # --------------------------------------------------
-    # Missing Report (optional: leere Listen zählen)
-    # --------------------------------------------------
-    def missing_report(self, treat_empty_lists_as_missing=True):
-        """
-        Erstellt einen Bericht über fehlende Werte im DataFrame.
-
-        Ein Wert gilt als "fehlend" (missing), wenn:
-        - er NaN oder None ist
-        - er eine leere Liste, Tupel oder Dict ist (optional)
-        - er ein leeres numpy Array ist
-        - er ein numerisches numpy Array ist, in dem alle Werte NaN sind
-
-        Parameters
-        ----------
-        treat_empty_lists_as_missing : bool, default True
-            Ob leere Listen, Tupel, Dicts als fehlend gezählt werden sollen.
-
-        Returns
-        -------
-        pandas.DataFrame
-            DataFrame mit den Spalten:
-            - "missing_n": absolute Anzahl fehlender Werte pro Spalte
-            - "missing_%": prozentualer Anteil fehlender Werte pro Spalte
-            sortiert nach "missing_%" absteigend.
-        """
-
+    def missing_report(self, treat_empty_lists_as_missing: bool = True) -> pd.DataFrame:
         def is_missing(x):
-            # numpy array zuerst abfangen
             if isinstance(x, np.ndarray):
-                if x.size == 0:
-                    return True
-                if np.issubdtype(x.dtype, np.number):
-                    return np.isnan(x).all()
-                return False
-
-            # NaN / None für normale Objekte
+                return x.size == 0 or (
+                    np.issubdtype(x.dtype, np.number) and np.isnan(x).all()
+                )
             if x is None:
                 return True
+            if treat_empty_lists_as_missing and isinstance(x, (list, tuple, dict)):
+                return len(x) == 0
             try:
-                if pd.isna(x):
-                    return True
-            except Exception:
-                pass  # manche Objekte lösen pd.isna aus
+                return bool(pd.isna(x))
+            except (ValueError, TypeError):
+                return False
 
-            if treat_empty_lists_as_missing:
-                if isinstance(x, (list, tuple)):
-                    return len(x) == 0
-                if isinstance(x, dict):
-                    return len(x) == 0
-
-            return False
-
-        # apply pro Spalte
         missing_n = self.df.apply(lambda col: col.apply(is_missing)).sum()
         missing_pct = (missing_n / len(self.df) * 100).round(2)
-
         return pd.DataFrame(
             {
                 "missing_n": missing_n,
@@ -134,339 +101,380 @@ class DataExplorer:
             }
         ).sort_values("missing_%", ascending=False)
 
+    # --------------------------------------------------
+    # Value Counts (auch für Listenfelder)
+    # --------------------------------------------------
+    def value_counts(self, column: str) -> pd.Series:
+        self._require(column)
+        s = self.df[column]
+        if s.apply(lambda x: isinstance(x, list)).any():
+            s = s.explode()
+        return s.value_counts(dropna=False)
 
+    # --------------------------------------------------
+    # Memory Report
+    # --------------------------------------------------
+    def memory_report(self) -> pd.DataFrame:
+        return (
+            self.df.dtypes.to_frame("dtype")
+            .join(self.df.memory_usage(deep=True).rename("bytes"))
+            .assign(MB=lambda d: (d["bytes"] / 1024**2).round(2))
+            .sort_values("MB", ascending=False)
+        )
+
+    def _require(self, *cols):
+        for col in cols:
+            if col not in self.df.columns:
+                raise ValueError(f"Spalte '{col}' nicht vorhanden")
 
 
 # ======================================================
-# MARC21-Spezifische Erweiterung
+# MARC21-Explorer — df_clean und df_transformed
 # ======================================================
 
 
 class Marc21Explorer(DataExplorer):
     """
-    Spezialisierte Analysefunktionen für MARC21-Listenfelder.
+    Spezialisierte Analyse für MARC21-Daten.
+    Methoden prüfen defensiv ob benötigte Spalten vorhanden sind.
     """
 
     # --------------------------------------------------
-    # Feldbelegung & Wiederholbarkeit
+    # Feldbelegung für Listenfelder
     # --------------------------------------------------
-    def field_stats(self, column):
-        if column not in self.df.columns:
-            raise ValueError(f"Spalte '{column}' existiert nicht")
-
+    def field_stats(self, column: str) -> dict:
+        self._require(column)
         lengths = self.df[column].apply(lambda x: len(x) if isinstance(x, list) else 0)
-
         total = len(lengths)
         non_empty = (lengths > 0).sum()
-
         return {
             "total_records": total,
-            "records_with_field": non_empty,
+            "records_with_field": int(non_empty),
             "presence_%": round(non_empty / total * 100, 2),
             "mean_occurrences": round(lengths.mean(), 2),
-            "max_occurrences": lengths.max(),
+            "max_occurrences": int(lengths.max()),
         }
 
     # --------------------------------------------------
-    # Subfield-Häufigkeiten (z.B. 650 $a)
+    # Subfield-Analyse (für _list-Felder aus df_raw)
     # --------------------------------------------------
-    def subfield_counts(self, column, subfield):
-        if column not in self.df.columns:
-            raise ValueError(f"Spalte '{column}' existiert nicht")
-
+    def subfield_counts(self, column: str, subfield: str) -> pd.Series:
+        self._require(column)
         series = self.df[column].explode()
-
         values = series.apply(
             lambda x: x.get(subfield) if isinstance(x, dict) else None
         )
-
         return values.value_counts(dropna=False)
 
-    # --------------------------------------------------
-    # Welche Subfields existieren?
-    # --------------------------------------------------
-    def subfield_overview(self, column):
-        if column not in self.df.columns:
-            raise ValueError(f"Spalte '{column}' existiert nicht")
-
-        series = self.df[column].explode()
-
-        keys = series.apply(
-            lambda x: list(x.keys()) if isinstance(x, dict) else []
-        ).explode()
-
+    def subfield_overview(self, column: str) -> pd.Series:
+        self._require(column)
+        keys = (
+            self.df[column]
+            .explode()
+            .apply(lambda x: list(x.keys()) if isinstance(x, dict) else [])
+            .explode()
+        )
         return keys.value_counts()
 
     # --------------------------------------------------
-    # Kontrollfeld 008 Positionsanalyse
+    # Kontrollfeld 008
     # --------------------------------------------------
-    def analyze_008(self, start, end):
-        if "control_008" not in self.df.columns:
-            raise ValueError("Spalte 'control_008' existiert nicht")
-
+    def analyze_008(self, start: int, end: int) -> pd.Series:
+        self._require("control_008")
         return self.df["control_008"].str[start:end].value_counts()
 
     # --------------------------------------------------
-    # SDNB
+    # Klassifikationsabdeckung nach Jahr — Kern-Chart
     # --------------------------------------------------
-    def analyze_sdnb_ddc_plotly(self, top_n: int = 10):
+    def plot_coverage_by_year(
+        self,
+        year_min: int = 1913,
+        year_max: int = 2024,
+    ) -> go.Figure:
+        self._require("publication_year", "ddc_primary_3digit", "has_sdnb")
+        
         """
-        Analysiert SDNB-Codes vs DDC-Hauptklasse.
-
-        - Anteil Dokumente mit SDNB
-        - Cross-Tab der Überschneidungen
-        - Heatmap mit Plotly
-        - Top-N Mappings pro DDC-Hauptklasse
-
-        Returns
-        -------
-        pd.DataFrame : Top-N SDNB-DDC Mappings
+        Klassifikationsabdeckung (SDNB / DDC / keine) nach Erscheinungsjahr.
+        Funktioniert auf df_transformed (has_sdnb, ddc_primary_3digit).
         """
+        self._require("publication_year")
+        df = self.df.copy()
+        df["_year"] = pd.to_numeric(df["publication_year"], errors="coerce")
+        df = df[df["_year"].between(year_min, year_max)]
+        df["_year"] = df["_year"].astype(int)
 
-        if (
-            "has_sdnb" not in self.df.columns
-            or "sdnb_ddc_mapped" not in self.df.columns
-        ):
-            raise ValueError("Benötigt Spalten 'has_sdnb' und 'sdnb_ddc_mapped'")
+        # Exklusive Kategorien — Reihenfolge ist Priorität
+        def _kategorie(row):
+            if row.get("ddc_primary_3digit", ""):
+                return "DDC (082/083)"
+            if row.get("has_sdnb", False):
+                return "SDNB (084)"
+            return "Keine Klassifikation"
 
-        # Anteil SDNB
-        sdnb_coverage = self.df["has_sdnb"].mean()
-        print(f"Anteil Dokumente mit SDNB: {sdnb_coverage:.2%}")
+        df["_kat"] = df.apply(_kategorie, axis=1)
 
-        # Crosstab
-        ct = pd.crosstab(
-            self.df["ddc_main_class"], self.df["sdnb_ddc_mapped"].explode()
+        by_year = (
+            df.groupby(["_year", "_kat"])
+            .size()
+            .reset_index(name="count")
         )
 
-        if ct.empty or ct.values.sum() == 0:
-            print("Keine Daten für Heatmap verfügbar.")
-            return ct
-
-        # Heatmap mit Plotly
-        fig = px.imshow(
-            ct,
-            labels=dict(x="SDNB-DDC", y="DDC Main Class", color="Anzahl"),
-            text_auto=True,
-            aspect="auto",
+        fig = px.bar(
+            by_year,
+            x="_year", y="count", color="_kat",
+            color_discrete_map={
+                "DDC (082/083)":        "#1E88E5",
+                "SDNB (084)":           "#FF9800",
+                "Keine Klassifikation": "#CFD8DC",
+            },
+            barnorm="percent",
+            barmode="stack",
+            title="Klassifikationsabdeckung DNB-Hochschulschriften",
+            labels={"_year": "Erscheinungsjahr", "count": "Anteil (%)", "_kat": ""},
+            category_orders={
+                "_kat": ["Keine Klassifikation", "SDNB (084)", "DDC (082/083)"]
+            },
         )
+        fig.update_layout(
+            plot_bgcolor="white",
+            height=500,
+            yaxis=dict(ticksuffix="%", range=[0, 100]),
+            legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"),
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="#EEEEEE", dtick=5, tickangle=-45)
+        fig.update_yaxes(showgrid=True, gridcolor="#EEEEEE")
+        return fig
 
-        fig.update_layout(title="DDC Main Class vs SDNB-DDC Mapping")
-        fig.show()
+    # --------------------------------------------------
+    # Mineralogie nach Jahrzehnt
+    # --------------------------------------------------
+    def plot_mineralogie_by_decade(self) -> go.Figure:
+        """Mineralogie-Records nach Jahrzehnt, gefärbt nach Klassifikationsstatus."""
+        self._require("publication_year", "is_mineralogie")
+        df = self.df[self.df["is_mineralogie"]].copy()
+        df["_year"] = pd.to_numeric(df["publication_year"], errors="coerce")
+        df = df[df["_year"].between(1940, 2024)]
+        df["decade"] = (df["_year"] // 10 * 10).astype(int)
 
-        # Top-N Mappings
-        top_mappings = {}
-        for ddc_class in ct.index:
-            top_mappings[ddc_class] = ct.loc[ddc_class].nlargest(top_n)
-
-        top_df = pd.DataFrame(top_mappings).T.fillna(0).astype(int)
-        print(f"Top {top_n} Mappings pro DDC Class:\n")
-        print(top_df)
-
-        return top_df
-
-    def analyze_sdnb_ddc_diff(self, top_n: int = 10, plot: bool = True):
-        """
-        Zeigt SDNB-DDC-Mappings, die von der DDC Primary Class abweichen.
-
-        - Nur Datensätze mit SDNB
-        - Cross-Tab der abweichenden Kombinationen
-        - Optional Heatmap
-        """
-        if (
-            "has_sdnb" not in self.df.columns
-            or "sdnb_ddc_mapped" not in self.df.columns
-        ):
-            raise ValueError(
-                "Benötigt Spalten 'has_sdnb' und 'sdnb_ddc_mapped' im DataFrame"
+        def klass_status(row):
+            has_ddc = (
+                isinstance(row.get("ddc_primary_3digit"), str)
+                and len(row["ddc_primary_3digit"]) > 0
             )
+            has_sdnb = row.get("has_sdnb", False)
+            if has_ddc:
+                return "DDC (082/083)"
+            if has_sdnb:
+                return "SDNB (084)"
+            return "Unklassifiziert"
 
-        # Filter: nur Datensätze mit SDNB
-        df_sdnb = self.df[self.df["has_sdnb"]].copy()
+        df["status"] = df.apply(klass_status, axis=1)
 
-        # Explodiere SDNB-Listen
-        exploded = df_sdnb.explode("sdnb_ddc_mapped")
-
-        # Filter: SDNB-DDC != DDC Primary
-        mask = exploded["sdnb_ddc_mapped"] != exploded["ddc_primary_3digit"]
-        exploded_diff = exploded[mask]
-
-        # Cross-Tab
-        ct = pd.crosstab(
-            exploded_diff["ddc_primary_3digit"], exploded_diff["sdnb_ddc_mapped"]
+        agg = df.groupby(["decade", "status"]).size().reset_index(name="count")
+        fig = px.bar(
+            agg,
+            x="decade",
+            y="count",
+            color="status",
+            color_discrete_map={
+                "DDC (082/083)": "#1E88E5",
+                "SDNB (084)": "#FF9800",
+                "Unklassifiziert": "#CFD8DC",
+            },
+            barmode="stack",
+            title="Mineralogie-Hochschulschriften nach Jahrzehnt",
+            labels={
+                "decade": "Jahrzehnt",
+                "count": "Anzahl",
+                "status": "Klassifikation",
+            },
         )
+        fig.update_layout(
+            plot_bgcolor="white",
+            height=450,
+            legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"),
+        )
+        return fig
 
-        if plot:
-            plt.figure(figsize=(10, 6))
-            sns.heatmap(ct, annot=True, fmt="d", cmap="Reds")
-            plt.title("Abweichende SDNB-DDC vs DDC Primary Class")
-            plt.ylabel("DDC Primary 3-digit")
-            plt.xlabel("SDNB-DDC Mapped")
-            plt.show()
-
-        # Top-N SDNB pro DDC Primary
-        top_mappings = {}
-        for ddc_class in ct.index:
-            sorted_cols = ct.loc[ddc_class].sort_values(ascending=False)
-            top_mappings[ddc_class] = sorted_cols.head(top_n)
-
-        top_df = pd.DataFrame(top_mappings).T.fillna(0).astype(int)
-        print(f"Top {top_n} abweichende SDNB-DDC Mappings pro DDC Primary Class:\n")
-        print(top_df)
-
-        return top_df
-
-# Ergänzen für DDC-Verteilung nach Zeitraum, Binary Target, Textfeld-Kombination, Top-Wörter pro Klasse
     # --------------------------------------------------
-    # DDC-Verteilung nach Zeitraum
+    # Retro-Bedarf nach Jahrzehnt
     # --------------------------------------------------
-    def ddc_distribution_by_period(self, bins):
-        """
-        Zeigt Verteilung der ddc_primary_3digit pro Zeitsegment.
-        bins: Liste von Jahresgrenzen, z.B. [1913, 1945, 1980, 2000, 2025]
-        """
-        if "publication_year" not in self.df.columns:
-            raise ValueError("Spalte 'publication_year' fehlt")
+    def plot_retro_bedarf(self) -> go.Figure:
+        """Unklassifizierte Mineralogie-Records — das Retro-Argument."""
+        self._require(
+            "publication_year", "is_mineralogie", "ddc_primary_3digit", "has_sdnb"
+        )
+        df = self.df[self.df["is_mineralogie"]].copy()
+        df["_year"] = pd.to_numeric(df["publication_year"], errors="coerce")
+        df = df[df["_year"].between(1940, 2024)]
+        df["decade"] = (df["_year"] // 10 * 10).astype(int)
+        df["_unclass"] = (df["ddc_primary_3digit"].str.len() == 0) & ~df["has_sdnb"]
 
-        if "ddc_primary_3digit" not in self.df.columns:
-            raise ValueError("Spalte 'ddc_primary_3digit' fehlt")
+        agg = (
+            df.groupby("decade")
+            .agg(total=("record_id", "count"), unclass=("_unclass", "sum"))
+            .reset_index()
+        )
+        agg["pct"] = (agg["unclass"] / agg["total"] * 100).round(1)
 
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(
+            go.Bar(
+                x=agg["decade"],
+                y=agg["unclass"],
+                name="Unklassifiziert (absolut)",
+                marker_color="#CFD8DC",
+            ),
+            secondary_y=False,
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=agg["decade"],
+                y=agg["pct"],
+                name="Anteil (%)",
+                mode="lines+markers",
+                line=dict(color="#E53935", width=2.5),
+            ),
+            secondary_y=True,
+        )
+        fig.add_vrect(
+            x0=1935,
+            x1=1975,
+            fillcolor="#E53935",
+            opacity=0.07,
+            annotation_text="Retro-Bedarf",
+            annotation_position="top left",
+            annotation_font_color="#E53935",
+        )
+        fig.update_layout(
+            title="Retroklassifizierungs-Bedarf: Unklassifizierte Mineralogie-Records",
+            plot_bgcolor="white",
+            height=450,
+            legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"),
+        )
+        fig.update_yaxes(
+            title_text="Anzahl", secondary_y=False, showgrid=True, gridcolor="#EEEEEE"
+        )
+        fig.update_yaxes(
+            title_text="Anteil (%)", secondary_y=True, ticksuffix="%", showgrid=False
+        )
+        return fig
+
+    # --------------------------------------------------
+    # DDC-Hierarchie für Sunburst
+    # --------------------------------------------------
+    def build_ddc_hierarchy(self) -> pd.DataFrame:
+        """
+        Aggregierter DDC-Hierarchie-DataFrame für Sunburst-Chart.
+        Benötigt ddc_primary_3digit aus ClassificationTransformer.
+        """
+        self._require("ddc_primary_3digit")
         df = self.df.copy()
-        df["period"] = pd.cut(df["publication_year"], bins=bins)
+        df["ddc3"] = df["ddc_primary_3digit"].astype(str).str.strip()
+        df = df[df["ddc3"].str.match(r"^\d{3}$")].copy()
 
-        return pd.crosstab(df["period"], df["ddc_primary_3digit"])
+        df["DDC_1_key"] = df["ddc3"].str[0]
+        df["DDC_1"] = df["DDC_1_key"].map(DDC_MAIN) + " (" + df["DDC_1_key"] + "00)"
+        df["DDC_2"] = df["ddc3"].str[:2] + "0"
+        df["DDC_3"] = df["ddc3"]
 
+        return df.groupby(["DDC_1", "DDC_2", "DDC_3"]).size().reset_index(name="count")
+
+    def plot_sunburst(self, max_depth: int = 2) -> go.Figure:
+        """Sunburst der DDC-Hierarchie."""
+        df_hier = self.build_ddc_hierarchy()
+        fig = px.sunburst(
+            df_hier,
+            path=["DDC_1", "DDC_2", "DDC_3"],
+            values="count",
+            title="DDC-Hierarchie DNB-Hochschulschriften",
+            color="count",
+            color_continuous_scale="Blues",
+            maxdepth=max_depth,
+        )
+        fig.update_traces(
+            hovertemplate="<b>%{label}</b><br>Records: %{value:,}<extra></extra>",
+        )
+        fig.update_layout(height=600, coloraxis_showscale=False)
+        return fig
 
     # --------------------------------------------------
-    # Binary Classification Target erstellen
+    # Text-Feature aufbauen
     # --------------------------------------------------
-    def build_binary_target(self, positive_class, negative_class):
+    def build_text_column(
+        self,
+        columns: List[str],
+        new_column: str = "text_combined",
+    ) -> pd.DataFrame:
         """
-        Filtert Datensatz auf zwei DDC-Klassen
-        und erzeugt binäres Label.
+        Kombiniert Textspalten zu einem Feature-Feld.
+        Subjects (List[str]) werden automatisch gejoined.
         """
-        df_subset = self.df[
-            self.df["ddc_primary_3digit"].isin([positive_class, negative_class])
-        ].copy()
 
-        df_subset["target"] = (
-            df_subset["ddc_primary_3digit"] == positive_class
-        ).astype(int)
-
-        print("Klassenverteilung:")
-        print(df_subset["target"].value_counts())
-
-        return df_subset
-
-
-    # --------------------------------------------------
-    # Textfeld kombinieren (Titel + Subjects)
-    # --------------------------------------------------
-    def build_text_column(self, columns, new_column="text_combined"):
-        """
-        Kombiniert mehrere Textspalten zu einem Feature-Feld.
-        Listen werden automatisch zusammengeführt.
-        """
         def combine(row):
             texts = []
             for col in columns:
                 val = row.get(col)
-
                 if isinstance(val, list):
-                    texts.append(" ".join(map(str, val)))
-                elif pd.notna(val):
-                    texts.append(str(val))
-
-            return " ".join(texts)
+                    texts.append(
+                        " ".join(
+                            s.split(";")[0].strip()  # ersten Term vor ; nehmen
+                            for s in map(str, val)
+                            if s.strip()
+                        )
+                    )
+                elif pd.notna(val) and str(val).strip():
+                    texts.append(str(val).strip())
+            return " ".join(texts).lower()
 
         self.df[new_column] = self.df.apply(combine, axis=1)
         return self.df
 
     # --------------------------------------------------
-    # DDC-Verteilung nach Zeitraum
+    # Klassifikations-Label für Retroklassifizierer
     # --------------------------------------------------
-    def ddc_distribution_by_period(self, bins):
+    def build_classification_target(
+        self,
+        positive_codes: dict,
+        label_col: str = "target_label",
+    ) -> pd.DataFrame:
         """
-        Zeigt Verteilung der ddc_primary_3digit pro Zeitsegment.
-        bins: Liste von Jahresgrenzen, z.B. [1913, 1945, 1980, 2000, 2025]
+        Erstellt Mehrklassen-Label.
+
+        Parameters
+        ----------
+        positive_codes : dict
+            z.B. {"Mineralogie": ["549"], "Petrologie": ["552"]}
         """
-        if "publication_year" not in self.df.columns:
-            raise ValueError("Spalte 'publication_year' fehlt")
-
-        if "ddc_primary_3digit" not in self.df.columns:
-            raise ValueError("Spalte 'ddc_primary_3digit' fehlt")
-
+        self._require("ddc_primary_3digit")
         df = self.df.copy()
-        df["period"] = pd.cut(df["publication_year"], bins=bins)
-
-        return pd.crosstab(df["period"], df["ddc_primary_3digit"])
-
-    # --------------------------------------------------
-    # Binary Classification Target erstellen
-    # --------------------------------------------------
-    def build_binary_target(self, positive_class, negative_class):
-        """
-        Filtert Datensatz auf zwei DDC-Klassen
-        und erzeugt binäres Label.
-        """
-        df_subset = self.df[
-            self.df["ddc_primary_3digit"].isin([positive_class, negative_class])
-        ].copy()
-
-        df_subset["target"] = (
-            df_subset["ddc_primary_3digit"] == positive_class
-        ).astype(int)
-
+        df[label_col] = "Sonstige"
+        for label, codes in positive_codes.items():
+            mask = df["ddc_primary_3digit"].isin(codes)
+            df.loc[mask, label_col] = label
         print("Klassenverteilung:")
-        print(df_subset["target"].value_counts())
-
-        return df_subset
+        print(df[label_col].value_counts())
+        return df
 
     # --------------------------------------------------
-    # Textfeld kombinieren (Titel + Subjects)
+    # Top-Terme pro Klasse
     # --------------------------------------------------
-    def build_text_column(self, columns, new_column="text_combined"):
-        """
-        Kombiniert mehrere Textspalten zu einem Feature-Feld.
-        Listen werden automatisch zusammengeführt.
-        """
-        def combine(row):
-            texts = []
-            for col in columns:
-                val = row.get(col)
-
-                if isinstance(val, list):
-                    texts.append(" ".join(map(str, val)))
-                elif pd.notna(val):
-                    texts.append(str(val))
-
-            return " ".join(texts)
-
-        self.df[new_column] = self.df.apply(combine, axis=1)
-        return self.df
-
-    
-    # --------------------------------------------------
-    # Top-Wörter pro Klasse
-    # --------------------------------------------------
-    def top_terms_by_class(self, text_column, target_column, top_n=20):
+    def top_terms_by_class(
+        self,
+        text_column: str,
+        target_column: str,
+        top_n: int = 20,
+    ) -> None:
         from sklearn.feature_extraction.text import TfidfVectorizer
 
+        self._require(text_column, target_column)
         df = self.df.dropna(subset=[text_column, target_column])
-
-        vectorizer = TfidfVectorizer(
-            max_features=5000,
-            ngram_range=(1, 2),
-            min_df=5
-        )
-
-        X = vectorizer.fit_transform(df[text_column])
-        y = df[target_column]
-
-        feature_names = np.array(vectorizer.get_feature_names_out())
-
-        for label in sorted(y.unique()):
-            mean_tfidf = X[y == label].mean(axis=0).A1
+        vec = TfidfVectorizer(max_features=5000, ngram_range=(1, 2), min_df=5)
+        X = vec.fit_transform(df[text_column])
+        feature_names = np.array(vec.get_feature_names_out())
+        for label in sorted(df[target_column].unique()):
+            mask = df[target_column] == label
+            mean_tfidf = X[mask].mean(axis=0).A1
             top_idx = mean_tfidf.argsort()[-top_n:][::-1]
-
-            print(f"\nTop Terms für Klasse {label}:")
-            print(feature_names[top_idx])
+            print(f"\nTop-{top_n} Terme für '{label}':")
+            print(", ".join(feature_names[top_idx]))
