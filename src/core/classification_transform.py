@@ -2,149 +2,164 @@
 classification_transform.py
 
 Transformationsmodul zur Weiterverarbeitung von aus MARC21 extrahierten
-Klassifikationsdaten (insbesondere DDC und alte DNB-Sachgruppen).
+Klassifikationsdaten (insbesondere DDC).
 
-Dieses Modul trennt bewusst die reine Datenextraktion (Parser)
-von der fachlichen Logik (Priorisierung, Mapping, Normalisierung).
+Dieses Modul übernimmt ausschließlich fachliche Logik:
+- Sammlung gültiger DDC-Codes (082 + 083)
+- Priorisierung (082 vor 083)
+- Normalisierung auf 3-Stellen-Ebene
+- Ableitung der Hauptklasse
+- Optionale SDNB→DDC-Mappings
 
-Funktionalität:
-- Priorisierung konkurrierender DDC-Felder (082 > 083 > 084)
-- Normalisierung von DDC-Werten (z. B. auf 3-Stellen-Ebene)
-- Mapping alter DNB-Sachgruppen auf DDC-Klassen
-- Transparente Beibehaltung aller Ursprungswerte
-
-Empfohlene Pipeline:
-    1. MARC21-Parsing → Roh-DataFrame
-    2. Transformation mit ClassificationTransformer
-    3. Analyse / Visualisierung
+Pipeline:
+    MARC21 → Cleaner → ClassificationTransformer → Analyse
 """
 
 from typing import Dict, List, Optional
 import pandas as pd
+import re
 
 
 class ClassificationTransformer:
-    """
-    Transformiert ein DataFrame mit extrahierten MARC21-Klassifikationsdaten.
-
-    Erwartete Spalten im Input-DataFrame:
-        - ddc_082_all : List[str]
-        - ddc_083_all : List[str]
-        - ddc_084_all : List[str]
-        - sachgruppe  : List[str]
-
-    Hinzugefügte Spalten:
-        - ddc_primary
-        - ddc_primary_3digit
-        - sachgruppe_ddc_mapped
-
-    Parameter
-    ----------
-    sachgruppe_mapping : dict, optional
-        Mapping-Tabelle von DNB-Sachgruppen (Prefix) zu DDC-Klassen.
-        Beispiel:
-            {
-                "01": "000",
-                "02": "100",
-                ...
-            }
-    """
 
     def __init__(self, sdnb_to_ddc_mapping: Optional[Dict[str, str]] = None):
         self.mapping = sdnb_to_ddc_mapping or {}
 
-    # ---------------------------------------------------------
-    # Öffentliche API
-    # ---------------------------------------------------------
-
+    # =====================================================
+    # Hauptfunktion
+    # =====================================================
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Führt alle Transformationsschritte auf dem DataFrame aus.
-
-        Schritte:
-            1. Priorisierung konkurrierender DDC-Felder
-            2. Normalisierung der Haupt-DDC auf 3-Stellen-Ebene
-            3. Mapping alter DNB-Sachgruppen auf DDC
-
-        Parameter
-        ----------
-        df : pandas.DataFrame
-            DataFrame mit extrahierten MARC21-Daten.
-
-        Returns
-        -------
-        pandas.DataFrame
-            Transformiertes DataFrame mit zusätzlichen Analyse-Spalten.
-        """
         df = df.copy()
 
-        df["ddc_primary"] = df.apply(self._prioritize_ddc, axis=1)
+        # Alle gültigen DDC-Codes sammeln
+        df["ddc_all_raw"] = df.apply(self._collect_ddc_codes, axis=1)
+
+        # Primary = erster valider Code (082 priorisiert)
+        df["ddc_primary"] = df["ddc_all_raw"].apply(
+            lambda lst: lst[0] if lst else ""
+        )
+
+        # Normalisierung
         df["ddc_primary_3digit"] = df["ddc_primary"].apply(
             self._normalize_ddc
         )
 
-        df["sachgruppe_ddc_mapped"] = df["sachgruppe"].apply(
-            self._map_sachgruppe
+        # Hauptklasse
+        df["ddc_main_class"] = df["ddc_primary_3digit"].apply(
+            self._derive_main_class
         )
+
+        # Geoscience-Flag
+        df["is_geoscience"] = df["ddc_all_raw"].apply(
+            self._is_geoscience
+        )
+
+        # Optional: SDNB-Mapping
+        if "sdnb_prefix" in df.columns and self.mapping:
+            df["sdnb_ddc_mapped"] = df["sdnb_prefix"].apply(
+                self._map_sdnb_to_ddc
+            )
 
         return df
 
-    # ---------------------------------------------------------
-    # Interne Methoden
-    # ---------------------------------------------------------
+    # =====================================================
+    # 1) DDC sammeln (082 priorisiert vor 083)
+    # =====================================================
+    def _collect_ddc_codes(self, row: pd.Series) -> List[str]:
+        codes = []
 
-    def _prioritize_ddc(self, row: pd.Series) -> str:
-        """
-        Priorisiert konkurrierende DDC-Felder.
+        # 082 zuerst
+        codes += self._extract_valid_ddc(
+            row.get("082_a", []),
+            row.get("082_2", [])
+        )
 
-        Reihenfolge:
-            1. 082
-            2. 083
-            3. 084
+        # dann 083
+        codes += self._extract_valid_ddc(
+            row.get("083_a", []),
+            row.get("083_2", [])
+        )
 
-        Gibt die erste verfügbare Klasse zurück.
-        """
-        for col in ["ddc_082_all", "ddc_083_all", "ddc_084_all"]:
-            values = row.get(col)
-            if isinstance(values, list) and values:
-                return values[0]
-        return ""
+        return codes
 
+    def _extract_valid_ddc(self, codes: List[str], editions: List[str]) -> List[str]:
+        result = []
+
+        if not isinstance(codes, list):
+            return result
+
+        for i, code in enumerate(codes):
+            edition = editions[i] if i < len(editions) else ""
+
+            if not isinstance(code, str):
+                continue
+
+            # Nur DDC-Edition 22 oder 23 zulassen
+            if isinstance(edition, str) and edition.startswith(("22", "23")):
+                result.append(code)
+
+        return result
+
+    # =====================================================
+    # 2) Normalisierung
+    # =====================================================
     def _normalize_ddc(self, ddc: str) -> str:
-        """
-        Normalisiert eine DDC-Notation.
-
-        - Entfernt Zusätze (z. B. nach "/")
-        - Kürzt auf die ersten drei Stellen
-        - Entfernt führende/trailing Spaces
-
-        Beispiel:
-            "530.12/045" → "530"
-        """
         if not isinstance(ddc, str) or not ddc:
             return ""
 
-        base = ddc.split("/")[0].strip()
-        return base[:3]
+        # nur erster Block (vor ; oder /)
+        ddc = ddc.split(";")[0].split("/")[0].strip()
 
-    def _map_sachgruppe(self, sachgruppen: List[str]) -> List[str]:
-        """
-        Mappt alte DNB-Sachgruppen auf DDC-Klassen anhand
-        eines Prefix-Mappings.
+        # führende Ziffern extrahieren
+        match = re.match(r"^(\d+)", ddc)
+        if not match:
+            return ""
 
-        Beispiel:
-            "05.12" → Prefix "05" → Mapping → "500"
-        """
-        if not isinstance(sachgruppen, list):
+        digits = match.group(1)
+
+        # 1-stellig → 500
+        if len(digits) == 1:
+            return digits + "00"
+
+        # 2-stellig → 330
+        if len(digits) == 2:
+            return digits + "0"
+
+        # >=3 → erste 3
+        return digits[:3]
+
+    # =====================================================
+    # 3) Hauptklasse (z.B. 550 → 500)
+    # =====================================================
+    def _derive_main_class(self, ddc3: str) -> str:
+        if not isinstance(ddc3, str) or not ddc3.isdigit():
+            return ""
+
+        return ddc3[0] + "00"
+
+    # =====================================================
+    # 4) Geoscience-Erkennung
+    # =====================================================
+    def _is_geoscience(self, codes: List[str]) -> bool:
+        if not isinstance(codes, list):
+            return False
+
+        for code in codes:
+            norm = self._normalize_ddc(code)
+            if norm.startswith("550"):
+                return True
+
+        return False
+
+    # =====================================================
+    # 5) SDNB-Mapping (optional)
+    # =====================================================
+    def _map_sdnb_to_ddc(self, prefixes: List[str]) -> List[str]:
+        if not isinstance(prefixes, list):
             return []
 
-        mapped = []
-        for sg in sachgruppen:
-            if not isinstance(sg, str):
-                continue
-
-            prefix = sg[:2]
-            if prefix in self.mapping:
-                mapped.append(self.mapping[prefix])
-
-        return mapped
+        return [
+            self.mapping[p]
+            for p in prefixes
+            if p in self.mapping
+        ]

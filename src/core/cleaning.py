@@ -6,114 +6,116 @@ DNB-Hochschulschriften-Daten.
 
 Verantwortung:
 - Listen-Spalten absichern
-- Datentypen optimieren
-- publication_year und ddc_main sauber als Int64
+- primitive Datentypen säubern
+- 082 / 083 / 084 Rohfelder extrahieren
+- keine Klassifikationslogik
 
 Pipeline:
     marc21_parser_full → Cleaner → ClassificationTransformer → Analyse
 """
 
-from typing import List
 import pandas as pd
 
 
 class Cleaner:
-    """
-    Führt grundlegende Datenbereinigung und Typoptimierung durch.
-
-    Erwartet ein DataFrame aus Marc21Parser.
-
-    Cleaning-Schritte:
-        1. Sicherstellen, dass definierte Spalten Listen enthalten
-        2. Konvertierung von 'publication_year' zu Int64
-        3. Konvertierung von 'ddc_main' zu Int64
-        4. Optimierung weiterer Datentypen (Kategorie, Int16, String)
-    """
 
     def apply(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Führt alle Cleaning-Schritte aus.
-
-        Parameter
-        ----------
-        df : pandas.DataFrame
-            Output des Marc21Parser
-
-        Returns
-        -------
-        pandas.DataFrame
-            Bereinigtes DataFrame
-        """
         df = df.copy()
         df = self._ensure_list_columns(df)
         df = self._clean_publication_year(df)
-        df = self._clean_ddc_main(df)
+        df = self._extract_082(df)
+        df = self._extract_083(df)
         df = self._extract_sdnb_from_084(df)
         df = self._optimize_dtypes(df)
         return df
 
-    # ---------------------------------------------------------
-    # Cleaning Steps
-    # ---------------------------------------------------------
-
-    def _ensure_list_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Stellt sicher, dass definierte Spalten immer Listen enthalten.
-        """
-        list_cols: List[str] = ["082_list", "083_list", "084_list", "subjects"]
-        for col in list_cols:
+    # --------------------------------------------------
+    # 1) Listen absichern
+    # --------------------------------------------------
+    def _ensure_list_columns(self, df):
+        for col in ["082_list", "083_list", "084_list", "subjects"]:
             if col in df.columns:
                 df[col] = df[col].apply(lambda x: x if isinstance(x, list) else [])
         return df
-        
-    def _clean_publication_year(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Konvertiert 'publication_year' sauber zu Int64,
-        ungültige Werte werden NaN.
-        """
+
+    # --------------------------------------------------
+    # 2) publication_year säubern
+    # --------------------------------------------------
+    def _clean_publication_year(self, df):
         if "publication_year" in df.columns:
-            df["publication_year"] = pd.to_numeric(df["publication_year"], errors="coerce").astype("Int64")
+            df["publication_year"] = (
+                pd.to_numeric(df["publication_year"], errors="coerce")
+                .astype("float")
+            )
+            df["publication_year"] = (
+                df["publication_year"]
+                .round()
+                .astype("Int64")
+            )
         return df
 
-    def _clean_ddc_main(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Bereinigt 'ddc_main':
-        - Konvertiert zu numerisch (Int64)
-        - Ungültige Werte werden NaN
-        - Extrahiert Hauptklasse (erste 3 Ziffern) als Kategorie
-        """
-        if "ddc_main" in df.columns:
-            # Rohwerte zu numerisch, Fehler -> NaN
-            df["ddc_main_raw"] = pd.to_numeric(df["ddc_main"], errors="coerce").astype("Int64")
+    # --------------------------------------------------
+    # 3) 082 extrahieren (DDC Hauptfeld)
+    # --------------------------------------------------
+    def _extract_082(self, df):
+        if "082_list" not in df.columns:
+            df["082_a"] = [[] for _ in range(len(df))]
+            df["082_2"] = [[] for _ in range(len(df))]
+            return df
 
-            # Hauptklasse: erste 3 Ziffern (z.B. 512.3 -> 512)
-            def extract_main_class(val):
-                if pd.isna(val):
-                    return pd.NA
-                s = str(val)
-                return int(s[:3]) if len(s) >= 3 else int(s)
+        def extract_a(lst):
+            return [
+                e.get("a")
+                for e in lst
+                if isinstance(e, dict) and "a" in e
+            ]
 
-            df["ddc_main"] = df["ddc_main_raw"].apply(extract_main_class).astype("category")
+        def extract_2(lst):
+            return [
+                e.get("2")
+                for e in lst
+                if isinstance(e, dict) and "2" in e
+            ]
 
-        return df    
+        df["082_a"] = df["082_list"].apply(extract_a)
+        df["082_2"] = df["082_list"].apply(extract_2)
+        return df
 
-    def _extract_sdnb_from_084(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Extrahiert alte DNB-Sachgruppen (SDNB) aus 084.
+    # --------------------------------------------------
+    # 4) 083 extrahieren (zusätzliche DDC)
+    # --------------------------------------------------
+    def _extract_083(self, df):
+        if "083_list" not in df.columns:
+            df["083_a"] = [[] for _ in range(len(df))]
+            df["083_2"] = [[] for _ in range(len(df))]
+            return df
 
-        Bedingung:
-            - Subfield $2 enthält 'dnb'
-            - Subfield $a enthält den Sachgruppen-Code
+        def extract_a(lst):
+            return [
+                e.get("a")
+                for e in lst
+                if isinstance(e, dict) and "a" in e
+            ]
 
-        Ergebnis:
-            Neue Spalten:
-                - sdnb_codes (List[str])
-                - has_sdnb (bool)
-        """
+        def extract_2(lst):
+            return [
+                e.get("2")
+                for e in lst
+                if isinstance(e, dict) and "2" in e
+            ]
 
+        df["083_a"] = df["083_list"].apply(extract_a)
+        df["083_2"] = df["083_list"].apply(extract_2)
+        return df
+
+    # --------------------------------------------------
+    # 5) 084 → SDNB extrahieren
+    # --------------------------------------------------
+    def _extract_sdnb_from_084(self, df):
         if "084_list" not in df.columns:
             df["sdnb_codes"] = [[] for _ in range(len(df))]
             df["has_sdnb"] = False
+            df["sdnb_prefix"] = [[] for _ in range(len(df))]
             return df
 
         def extract_sdnb(entries):
@@ -134,42 +136,32 @@ class Cleaner:
             return result
 
         df["sdnb_codes"] = df["084_list"].apply(extract_sdnb)
-
-        # Vektorisierte Bool-Spalte (performanter als lambda)
         df["has_sdnb"] = df["sdnb_codes"].str.len().gt(0)
-
         df["sdnb_prefix"] = df["sdnb_codes"].apply(
-        lambda lst: [code[:2] for code in lst] 
+            lambda lst: [code[:2] for code in lst]
         )
 
         return df
-            
-    def _optimize_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Optimiert Datentypen für Speicher und Analyse.
-        """
-        # --- Kategorische Variablen ---
-        cat_cols = ["language", "publication_place", "publisher"]
-        for col in cat_cols:
+
+    # --------------------------------------------------
+    # 6) Datentypen optimieren
+    # --------------------------------------------------
+    def _optimize_dtypes(self, df):
+        for col in ["language", "publication_place", "publisher"]:
             if col in df.columns:
                 df[col] = df[col].astype("category")
 
-        # --- record_id als String ---
         if "record_id" in df.columns:
             df["record_id"] = df["record_id"].astype("string")
 
-        # --- subject_count ---
         if "subject_count" in df.columns:
-            df["subject_count"] = pd.to_numeric(df["subject_count"], errors="coerce").astype("Int16")
+            df["subject_count"] = (
+                pd.to_numeric(df["subject_count"], errors="coerce")
+                .astype("Int32")
+            )
 
         return df
 
-    # ---------------------------------------------------------
-    # Statische Convenience-Methode
-    # ---------------------------------------------------------
     @staticmethod
     def clean_library_df(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Führt das komplette Cleaning direkt aus, ohne Cleaner instanziieren zu müssen.
-        """
         return Cleaner().apply(df)
