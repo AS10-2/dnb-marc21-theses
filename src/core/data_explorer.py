@@ -19,6 +19,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sklearn.feature_extraction.text import TfidfVectorizer
+
 
 # ── DDC-Hauptklassen ──────────────────────────────────────────
 DDC_MAIN = {
@@ -186,32 +188,22 @@ class Marc21Explorer(DataExplorer):
     # --------------------------------------------------
     # Klassifikationsabdeckung nach Jahr — Kern-Chart
     # --------------------------------------------------
-    def plot_coverage_by_year(
-        self,
-        year_min: int = 1913,
-        year_max: int = 2024,
-    ) -> go.Figure:
+    def plot_coverage_by_year(self, year_min: int = 1913, year_max: int = 2024):
         self._require("publication_year", "ddc_primary_3digit", "has_sdnb")
-        
-        """
-        Klassifikationsabdeckung (SDNB / DDC / keine) nach Erscheinungsjahr.
-        Funktioniert auf df_transformed (has_sdnb, ddc_primary_3digit).
-        """
-        self._require("publication_year")
+
         df = self.df.copy()
         df["_year"] = pd.to_numeric(df["publication_year"], errors="coerce")
         df = df[df["_year"].between(year_min, year_max)]
         df["_year"] = df["_year"].astype(int)
 
-        # Exklusive Kategorien — Reihenfolge ist Priorität
-        def _kategorie(row):
-            if row.get("ddc_primary_3digit", ""):
-                return "DDC (082/083)"
-            if row.get("has_sdnb", False):
-                return "SDNB (084)"
-            return "Keine Klassifikation"
+        has_ddc = df["ddc_primary_3digit"].fillna("").str.len() > 0
+        has_sdnb = df["has_sdnb"].fillna(False)
 
-        df["_kat"] = df.apply(_kategorie, axis=1)
+        df["_kat"] = np.select(
+        [has_ddc, has_sdnb],
+        ["DDC (082/083)", "SDNB (084)"],
+        default="Keine Klassifikation"
+    )
 
         by_year = (
             df.groupby(["_year", "_kat"])
@@ -220,29 +212,35 @@ class Marc21Explorer(DataExplorer):
         )
 
         fig = px.bar(
-            by_year,
-            x="_year", y="count", color="_kat",
-            color_discrete_map={
-                "DDC (082/083)":        "#1E88E5",
-                "SDNB (084)":           "#FF9800",
-                "Keine Klassifikation": "#CFD8DC",
-            },
-            barnorm="percent",
-            barmode="stack",
-            title="Klassifikationsabdeckung DNB-Hochschulschriften",
-            labels={"_year": "Erscheinungsjahr", "count": "Anteil (%)", "_kat": ""},
-            category_orders={
-                "_kat": ["Keine Klassifikation", "SDNB (084)", "DDC (082/083)"]
-            },
-        )
+        by_year,
+        x="_year",
+        y="count",
+        color="_kat",
+        color_discrete_map={
+            "DDC (082/083)": "#1E88E5",
+            "SDNB (084)": "#FF9800",
+            "Keine Klassifikation": "#CFD8DC",
+        },
+        barmode="stack",
+        title="Klassifikationsabdeckung DNB-Hochschulschriften",
+        labels={"_year": "Erscheinungsjahr", "count": "Anteil (%)", "_kat": ""},
+        category_orders={
+            "_kat": ["Keine Klassifikation", "SDNB (084)", "DDC (082/083)"]
+        },
+    )
+
+        # Prozentuale Stappelung
         fig.update_layout(
             plot_bgcolor="white",
             height=500,
+            barnorm="percent",
             yaxis=dict(ticksuffix="%", range=[0, 100]),
             legend=dict(orientation="h", y=1.08, x=0.5, xanchor="center"),
         )
+
         fig.update_xaxes(showgrid=True, gridcolor="#EEEEEE", dtick=5, tickangle=-45)
         fig.update_yaxes(showgrid=True, gridcolor="#EEEEEE")
+
         return fig
 
     # --------------------------------------------------
@@ -250,7 +248,12 @@ class Marc21Explorer(DataExplorer):
     # --------------------------------------------------
     def plot_mineralogie_by_decade(self) -> go.Figure:
         """Mineralogie-Records nach Jahrzehnt, gefärbt nach Klassifikationsstatus."""
-        self._require("publication_year", "is_mineralogie")
+        self._require(
+        "publication_year",
+        "is_mineralogie",
+        "ddc_primary_3digit",
+        "has_sdnb",
+        )
         df = self.df[self.df["is_mineralogie"]].copy()
         df["_year"] = pd.to_numeric(df["publication_year"], errors="coerce")
         df = df[df["_year"].between(1940, 2024)]
@@ -302,13 +305,19 @@ class Marc21Explorer(DataExplorer):
     def plot_retro_bedarf(self) -> go.Figure:
         """Unklassifizierte Mineralogie-Records — das Retro-Argument."""
         self._require(
-            "publication_year", "is_mineralogie", "ddc_primary_3digit", "has_sdnb"
+        "publication_year",
+        "is_mineralogie",
+        "ddc_primary_3digit",
+        "has_sdnb",
+        "record_id",
         )
         df = self.df[self.df["is_mineralogie"]].copy()
         df["_year"] = pd.to_numeric(df["publication_year"], errors="coerce")
         df = df[df["_year"].between(1940, 2024)]
         df["decade"] = (df["_year"] // 10 * 10).astype(int)
-        df["_unclass"] = (df["ddc_primary_3digit"].str.len() == 0) & ~df["has_sdnb"]
+        df["_unclass"] = (df["ddc_primary_3digit"].fillna("").str.len() == 0) & ~df[
+            "has_sdnb"
+        ].fillna(False)
 
         agg = (
             df.groupby("decade")
@@ -374,7 +383,8 @@ class Marc21Explorer(DataExplorer):
         df = df[df["ddc3"].str.match(r"^\d{3}$")].copy()
 
         df["DDC_1_key"] = df["ddc3"].str[0]
-        df["DDC_1"] = df["DDC_1_key"].map(DDC_MAIN) + " (" + df["DDC_1_key"] + "00)"
+        df["DDC_1_label"] = df["DDC_1_key"].map(DDC_MAIN).fillna("Unbekannt")
+        df["DDC_1"] = df["DDC_1_label"] + " (" + df["DDC_1_key"] + "00)"
         df["DDC_2"] = df["ddc3"].str[:2] + "0"
         df["DDC_3"] = df["ddc3"]
 
@@ -437,6 +447,7 @@ class Marc21Explorer(DataExplorer):
         self,
         positive_codes: dict,
         label_col: str = "target_label",
+        verbose: bool = False,
     ) -> pd.DataFrame:
         """
         Erstellt Mehrklassen-Label.
@@ -452,8 +463,11 @@ class Marc21Explorer(DataExplorer):
         for label, codes in positive_codes.items():
             mask = df["ddc_primary_3digit"].isin(codes)
             df.loc[mask, label_col] = label
-        print("Klassenverteilung:")
-        print(df[label_col].value_counts())
+
+        if verbose:
+            print("Klassifikationsverteilung:")
+            print(df[label_col].value_counts())
+
         return df
 
     # --------------------------------------------------
@@ -464,17 +478,51 @@ class Marc21Explorer(DataExplorer):
         text_column: str,
         target_column: str,
         top_n: int = 20,
-    ) -> None:
-        from sklearn.feature_extraction.text import TfidfVectorizer
+    ) -> pd.DataFrame:
+        """
+        Ermittelt Top-TF-IDF-Terme pro Klasse (ML/Feature-Store-Style).
+
+        Returns
+        -------
+        DataFrame mit Spalten:
+            - class: Klassenlabel
+            - term: Term
+            - score: mittlerer TF-IDF-Score
+
+        Notes
+        -----
+        Geeignet für:
+            - Feature-Analyse
+            - Feature-Store-Export
+            - ML-Interpretation
+        """
 
         self._require(text_column, target_column)
         df = self.df.dropna(subset=[text_column, target_column])
+
+        if df.shape[0] < 5:
+            return pd.DataFrame(columns=["class", "term", "score"])
+
         vec = TfidfVectorizer(max_features=5000, ngram_range=(1, 2), min_df=5)
         X = vec.fit_transform(df[text_column])
         feature_names = np.array(vec.get_feature_names_out())
+
+        rows = []
+
         for label in sorted(df[target_column].unique()):
             mask = df[target_column] == label
-            mean_tfidf = X[mask].mean(axis=0).A1
+            if mask.sum() < 5:
+                continue
+
+            X_subset = X[mask.values]
+            mean_tfidf = X_subset.mean(axis=0).A1
             top_idx = mean_tfidf.argsort()[-top_n:][::-1]
-            print(f"\nTop-{top_n} Terme für '{label}':")
-            print(", ".join(feature_names[top_idx]))
+
+            for idx in top_idx:
+                rows.append({
+                    "class": label,
+                    "term": feature_names[idx],
+                    "score": float(mean_tfidf[idx]),
+                })
+
+        return pd.DataFrame(rows)

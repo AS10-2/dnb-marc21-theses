@@ -45,7 +45,7 @@ class Cleaner:
         return df
 
     # --------------------------------------------------
-    # 1) Listen absichern
+    # Listen absichern
     # --------------------------------------------------
     def _ensure_list_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         for col in ["082_list", "083_list", "084_list", "subjects"]:
@@ -54,7 +54,7 @@ class Cleaner:
         return df
 
     # --------------------------------------------------
-    # 2) publication_year
+    # publication_year
     # --------------------------------------------------
     def _clean_publication_year(self, df: pd.DataFrame) -> pd.DataFrame:
         if "publication_year" not in df.columns:
@@ -71,7 +71,7 @@ class Cleaner:
         return df
 
     # --------------------------------------------------
-    # 3) Subjects splitten
+    # Subjects splitten
     # --------------------------------------------------
     def _clean_subjects(self, df: pd.DataFrame) -> pd.DataFrame:
         if "subjects" not in df.columns:
@@ -84,7 +84,7 @@ class Cleaner:
         return df
 
     # --------------------------------------------------
-    # 4) 082 / 083 extrahieren
+    # 082 / 083 extrahieren
     # --------------------------------------------------
     def _extract_ddc_field(self, df: pd.DataFrame, tag: str) -> pd.DataFrame:
         col = f"{tag}_list"
@@ -115,7 +115,7 @@ class Cleaner:
         return df
 
     # --------------------------------------------------
-    # 5) SDNB-Codes aus 084 isolieren
+    # SDNB-Codes aus 084 isolieren
     # --------------------------------------------------
     def _extract_sdnb_from_084(self, df: pd.DataFrame) -> pd.DataFrame:
         if "084_list" not in df.columns:
@@ -145,19 +145,7 @@ class Cleaner:
         return df
 
     # --------------------------------------------------
-    # 6) Rohe List-Spalten droppen
-    # --------------------------------------------------
-    def _drop_raw_list_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Gibt Speicher frei nach der Extraktion.
-        082_list / 083_list / 084_list werden danach nicht mehr gebraucht.
-        """
-        drop_cols = ["082_list", "083_list", "084_list"]
-        df = df.drop(columns=[c for c in drop_cols if c in df.columns])
-        return df
-
-    # --------------------------------------------------
-    # 7) Datentypen optimieren
+    # Datentypen optimieren
     # --------------------------------------------------
     def _optimize_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
 
@@ -179,6 +167,9 @@ class Cleaner:
 
         return df
 
+    # --------------------------------------------------
+    # Rohe List-Spalten droppen
+    # --------------------------------------------------
     def _drop_raw_list_columns(self, df: pd.DataFrame) -> pd.DataFrame:
         drop_cols = [
             "082_list",
